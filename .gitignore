@@ -208,7 +208,7 @@ __marimo__/
 
 cactus
 
-# Eval server (contains held-out evals and scoring)
+# Eval server (contains held-out evals, scoring, and uploads)
 server/
 
 # Leaderboard data
