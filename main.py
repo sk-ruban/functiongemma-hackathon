@@ -143,17 +143,75 @@ def generate_cloud(messages, tools):
     }
 
 
+ACTION_VERBS = {"set", "check", "get", "send", "text", "play", "find", "remind",
+                "look", "search", "create", "wake", "tell", "show", "turn", "make",
+                "start", "message", "ask", "add", "cancel", "stop", "open"}
+
+def _decompose_query(query):
+    """Split multi-intent query into sub-queries. Only splits when word after
+    conjunction is an action verb."""
+    splitters = [" and ", ", ", " then ", " also ", " plus "]
+    parts = [query]
+    for splitter in splitters:
+        new_parts = []
+        for part in parts:
+            candidates = part.split(splitter)
+            if len(candidates) == 1:
+                new_parts.append(part)
+                continue
+            merged = [candidates[0]]
+            for c in candidates[1:]:
+                first_word = c.strip().split()[0].lower() if c.strip() else ""
+                if first_word in ACTION_VERBS:
+                    merged.append(c.strip())
+                else:
+                    merged[-1] += splitter + c
+            new_parts.extend(merged)
+        parts = new_parts
+    return [p.strip() for p in parts if p.strip()]
+
+
 def generate_hybrid(messages, tools):
-    """Hybrid inference: trust on-device, cloud only if Cactus returns nothing."""
-    local = generate_cactus(messages, tools)
+    """Hybrid inference with query decomposition for multi-intent queries."""
+    user_msg = messages[-1]["content"] if messages else ""
+    sub_queries = _decompose_query(user_msg)
 
-    if local["function_calls"]:
-        local["source"] = "on-device"
-        return local
+    # Single intent — normal path
+    if len(sub_queries) <= 1:
+        local = generate_cactus(messages, tools)
+        if local["function_calls"]:
+            local["source"] = "on-device"
+            return local
+        cloud = generate_cloud(messages, tools)
+        cloud["source"] = "cloud (fallback)"
+        cloud["total_time_ms"] += local["total_time_ms"]
+        return cloud
 
+    # Multi-intent — per-sub-query with cloud fallback
+    all_calls = []
+    total_time = 0
+    for sq in sub_queries:
+        sub_messages = [{"role": "user", "content": sq}]
+        local = generate_cactus(sub_messages, tools)
+        total_time += local.get("total_time_ms", 0)
+        if local["function_calls"]:
+            all_calls.extend(local["function_calls"])
+        else:
+            cloud = generate_cloud(sub_messages, tools)
+            total_time += cloud.get("total_time_ms", 0)
+            all_calls.extend(cloud.get("function_calls", []))
+
+    if all_calls:
+        return {
+            "function_calls": all_calls,
+            "total_time_ms": total_time,
+            "source": "on-device",
+        }
+
+    # Everything failed
     cloud = generate_cloud(messages, tools)
     cloud["source"] = "cloud (fallback)"
-    cloud["total_time_ms"] += local["total_time_ms"]
+    cloud["total_time_ms"] += total_time
     return cloud
 
 
