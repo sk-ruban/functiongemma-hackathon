@@ -29,12 +29,13 @@ def generate_cactus(messages, tools):
 
     raw_str = cactus_complete(
         model,
-        [{"role": "system", "content": "You are a helpful assistant that can use tools."}] + messages,
+        [{"role": "system", "content": "You are a model that can do function calling with the following functions"}] + messages,
         tools=cactus_tools,
         force_tools=True,
         max_tokens=256,
         stop_sequences=["<|im_end|>", "<end_of_turn>"],
         confidence_threshold=0.1,
+        tool_rag_top_k=0,
     )
 
     try:
