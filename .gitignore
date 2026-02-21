@@ -1,3 +1,10 @@
+.DS_Store
+CLAUDE.md
+BENCHMARK.md
+PLAN.md
+OBSERVATIONS.md
+benchmark_hard.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

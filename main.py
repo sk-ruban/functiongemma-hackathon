@@ -4,14 +4,23 @@ sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
 
 import json, os, time
-from cactus import cactus_init, cactus_complete, cactus_destroy
+from cactus import cactus_init, cactus_complete, cactus_destroy, cactus_reset
 from google import genai
 from google.genai import types
+
+_model = None
+
+def _get_model():
+    global _model
+    if _model is None:
+        _model = cactus_init(functiongemma_path)
+    return _model
 
 
 def generate_cactus(messages, tools):
     """Run function calling on-device via FunctionGemma + Cactus."""
-    model = cactus_init(functiongemma_path)
+    model = _get_model()
+    cactus_reset(model)
 
     cactus_tools = [{
         "type": "function",
@@ -25,9 +34,8 @@ def generate_cactus(messages, tools):
         force_tools=True,
         max_tokens=256,
         stop_sequences=["<|im_end|>", "<end_of_turn>"],
+        confidence_threshold=0.1,
     )
-
-    cactus_destroy(model)
 
     try:
         raw = json.loads(raw_str)
@@ -72,7 +80,7 @@ def generate_cloud(messages, tools):
     start_time = time.time()
 
     gemini_response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=contents,
         config=types.GenerateContentConfig(tools=gemini_tools),
     )
@@ -94,17 +102,16 @@ def generate_cloud(messages, tools):
     }
 
 
-def generate_hybrid(messages, tools, confidence_threshold=0.99):
-    """Baseline hybrid inference strategy; fall back to cloud if Cactus Confidence is below threshold."""
+def generate_hybrid(messages, tools):
+    """Hybrid inference: trust on-device, cloud only if Cactus returns nothing."""
     local = generate_cactus(messages, tools)
 
-    if local["confidence"] >= confidence_threshold:
+    if local["function_calls"]:
         local["source"] = "on-device"
         return local
 
     cloud = generate_cloud(messages, tools)
     cloud["source"] = "cloud (fallback)"
-    cloud["local_confidence"] = local["confidence"]
     cloud["total_time_ms"] += local["total_time_ms"]
     return cloud
 
