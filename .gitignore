@@ -3,7 +3,9 @@ CLAUDE.md
 BENCHMARK.md
 PLAN.md
 OBSERVATIONS.md
-benchmark_hard.py
+SPIKE_SPEC.md
+benchmark_real.py
+main_regex.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -214,6 +216,24 @@ marimo/_lsp/
 __marimo__/
 
 cactus
+
+# Xcode
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
 
 # Eval server (contains held-out evals, scoring, and uploads)
 server/
