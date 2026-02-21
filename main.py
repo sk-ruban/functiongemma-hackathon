@@ -171,10 +171,29 @@ def _decompose_query(query):
     return [p.strip() for p in parts if p.strip()]
 
 
+def _resolve_pronouns(sub_queries):
+    """Replace pronouns in later sub-queries with names from earlier ones."""
+    names = []
+    for sq in sub_queries:
+        found = re.findall(r'\b([A-Z][a-z]+)\b', sq)
+        names.extend(found)
+
+    resolved = [sub_queries[0]]
+    for sq in sub_queries[1:]:
+        if names:
+            sq = re.sub(r'\bhim\b', names[0], sq, flags=re.IGNORECASE)
+            sq = re.sub(r'\bher\b', names[0], sq, flags=re.IGNORECASE)
+            sq = re.sub(r'\bthem\b', names[0], sq, flags=re.IGNORECASE)
+        resolved.append(sq)
+    return resolved
+
+
 def generate_hybrid(messages, tools):
     """Hybrid inference with query decomposition for multi-intent queries."""
     user_msg = messages[-1]["content"] if messages else ""
     sub_queries = _decompose_query(user_msg)
+    if len(sub_queries) > 1:
+        sub_queries = _resolve_pronouns(sub_queries)
 
     # Single intent — normal path
     if len(sub_queries) <= 1:
@@ -205,6 +224,7 @@ def generate_hybrid(messages, tools):
         return {
             "function_calls": all_calls,
             "total_time_ms": total_time,
+            "confidence": 0.9,
             "source": "on-device",
         }
 
