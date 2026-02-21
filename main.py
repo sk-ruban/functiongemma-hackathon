@@ -8,6 +8,12 @@ from cactus import cactus_init, cactus_complete, cactus_destroy, cactus_reset
 from google import genai
 from google.genai import types
 
+DESCRIPTION_OVERRIDES = {
+    "set_timer": "Set a countdown timer for a duration in minutes. NOT an alarm.",
+    "set_alarm": "Set an alarm for a specific time of day. NOT a timer.",
+    "create_reminder": "Create a reminder with a title and time.",
+}
+
 _model = None
 
 def _get_model():
@@ -44,10 +50,17 @@ def generate_cactus(messages, tools):
     model = _get_model()
     cactus_reset(model)
 
+    enriched_tools = []
+    for t in tools:
+        t_copy = dict(t)
+        if t["name"] in DESCRIPTION_OVERRIDES:
+            t_copy["description"] = DESCRIPTION_OVERRIDES[t["name"]]
+        enriched_tools.append(t_copy)
+
     cactus_tools = [{
         "type": "function",
         "function": t,
-    } for t in tools]
+    } for t in enriched_tools]
 
     raw_str = cactus_complete(
         model,
