@@ -37,7 +37,7 @@ struct MenuBarPopover: View {
             Image(systemName: "waveform.circle")
                 .font(.system(size: 40))
                 .foregroundStyle(.secondary)
-            Text("Hold Ctrl+Option+` to speak")
+            Text("Hold Option+Space to speak")
                 .font(.headline)
             Text("Release to process")
                 .font(.caption)

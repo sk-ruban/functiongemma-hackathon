@@ -4,24 +4,42 @@ Local FastAPI server bridging Swift UI to Cactus on-device inference.
 Run: uvicorn server:app --host 127.0.0.1 --port 8420
 """
 
-import sys, os, json, tempfile
-sys.path.insert(0, "../../cactus/python/src")
+import sys, os, json, tempfile, threading, subprocess, wave
 
-from fastapi import FastAPI, UploadFile, File, Form
+# Resolve all paths relative to the repo root so generate_hybrid finds its models
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+os.chdir(REPO_ROOT)
+
+sys.path.insert(0, os.path.join(REPO_ROOT, "cactus/python/src"))
+
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
-from cactus import cactus_init, cactus_transcribe, cactus_destroy
+from contextlib import asynccontextmanager
+from cactus import cactus_init, cactus_destroy
+import cactus as _cactus_mod
+import ctypes
 
-# Import generate_hybrid from the hackathon main.py
-sys.path.insert(0, "../..")
+sys.path.insert(0, REPO_ROOT)
 from main import generate_hybrid
 
-app = FastAPI()
+WHISPER_PATH = os.path.join(REPO_ROOT, "cactus/weights/whisper-small")
 
-# ── Model paths (adjust if needed) ──
-WHISPER_PATH = "../../cactus/weights/whisper-small"
-FUNCTIONGEMMA_PATH = "../../cactus/weights/functiongemma-270m-it"
+whisper_model = None
+whisper_lock = threading.Lock()
 
-# ── Tool definitions ──
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global whisper_model
+    whisper_model = cactus_init(WHISPER_PATH)
+    yield
+    if whisper_model is not None:
+        cactus_destroy(whisper_model)
+        whisper_model = None
+
+
+app = FastAPI(lifespan=lifespan)
+
 TOOLS = [
     {
         "name": "open_app",
@@ -82,40 +100,59 @@ TOOLS = [
 
 
 @app.post("/transcribe_and_act")
-async def transcribe_and_act(audio: UploadFile = File(...)):
-    """
-    Full pipeline: audio → transcription → tool routing → response.
-
-    Returns JSON:
-    {
-        "transcription": "open safari and type hello",
-        "function_calls": [
-            {"name": "open_app", "arguments": {"name": "Safari"}},
-            {"name": "type_text", "arguments": {"text": "hello"}}
-        ],
-        "source": "on-device" | "cloud (fallback)",
-        "confidence": 0.95,
-        "total_time_ms": 234.5,
-        "transcription_time_ms": 89.2,
-        "routing_time_ms": 145.3
-    }
-    """
+def transcribe_and_act(audio: UploadFile = File(...)):
     import time
 
-    # ── Step 1: Save uploaded audio to temp file ──
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        content = await audio.read()
+        content = audio.file.read()
         tmp.write(content)
         tmp_path = tmp.name
 
+    af_path = tmp_path.replace(".wav", "") + "_af.wav"
+
     try:
-        # ── Step 2: Transcribe with Cactus Whisper ──
         t0 = time.time()
-        whisper = cactus_init(WHISPER_PATH)
+
+        # Convert uploaded audio to guaranteed 16kHz mono PCM WAV
+        subprocess.run(
+            ["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@16000", tmp_path, af_path],
+            check=True, capture_output=True,
+        )
+
+        # Re-write with clean 44-byte header (afconvert pads to 4096 which confuses cactus)
+        clean_path = tmp_path.replace(".wav", "") + "_clean.wav"
+        with wave.open(af_path, "rb") as rf:
+            pcm = rf.readframes(rf.getnframes())
+        with wave.open(clean_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(pcm)
+
+        import shutil
+        shutil.copy2(clean_path, "/tmp/spike_last_recording.wav")
+
+        # Force filesystem flush before C code reads
+        os.sync()
+
         prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
-        transcript_raw = cactus_transcribe(whisper, tmp_path, prompt)
-        transcript = json.loads(transcript_raw).get("response", "")
-        cactus_destroy(whisper)
+        with whisper_lock:
+            _cactus_mod._lib.cactus_reset(whisper_model)
+            buf = ctypes.create_string_buffer(65536)
+            opts = b'{"use_vad": false}'
+            _cactus_mod._lib.cactus_transcribe(
+                whisper_model,
+                clean_path.encode(), prompt.encode(),
+                buf, len(buf),
+                opts, _cactus_mod.TokenCallback(), None,
+                None, 0,
+            )
+            transcript_raw = buf.value.decode()
+        print(f"[DEBUG] Whisper raw: {transcript_raw}")
+
+        parsed = json.loads(transcript_raw) if transcript_raw else {}
+        transcript = parsed.get("response", "") or ""
+        print(f"[DEBUG] Transcript: '{transcript}'")
         transcription_time_ms = (time.time() - t0) * 1000
 
         if not transcript.strip():
@@ -130,7 +167,6 @@ async def transcribe_and_act(audio: UploadFile = File(...)):
                 "error": "Empty transcription"
             })
 
-        # ── Step 3: Route through generate_hybrid ──
         t1 = time.time()
         messages = [{"role": "user", "content": transcript}]
         result = generate_hybrid(messages, TOOLS)
@@ -146,8 +182,19 @@ async def transcribe_and_act(audio: UploadFile = File(...)):
             "routing_time_ms": routing_time_ms,
         })
 
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            {"error": f"{type(e).__name__}: {e}"},
+            status_code=500,
+        )
+
     finally:
-        os.unlink(tmp_path)
+        base = tmp_path.replace(".wav", "")
+        for p in [tmp_path, af_path, base + "_clean.wav"]:
+            if os.path.exists(p):
+                os.unlink(p)
 
 
 @app.get("/health")

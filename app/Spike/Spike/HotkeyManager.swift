@@ -10,7 +10,7 @@ final class HotkeyManager {
         self.onKeyDown = onKeyDown
         self.onKeyUp = onKeyUp
 
-        hotKey = HotKey(key: .grave, modifiers: [.control, .option])
+        hotKey = HotKey(key: .space, modifiers: [.option])
         hotKey?.keyDownHandler = { [weak self] in
             self?.onKeyDown()
         }
