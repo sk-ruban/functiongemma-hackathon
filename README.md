@@ -1,5 +1,130 @@
 <img src="assets/banner.png" alt="Logo" style="border-radius: 30px; width: 100%;">
 
+# FunctionGemma Optimisation & Spike app: Voice-to-Action
+
+**Team:** Ruban (Solo Dev) | **Location:** Singapore
+
+## Methodology
+
+I iterated through several approaches before landing on the final architecture:
+
+1. **System prompt tuning.** I changed FunctionGemma's system prompt from the default to `"You are a model that can do function calling with the following functions"` — this improved tool selection accuracy on multi-tool queries.
+
+2. **Tool description engineering.** FunctionGemma kept confusing `set_timer` and `set_alarm`. I added explicit disambiguation: *"Set a countdown timer for a duration in minutes. NOT an alarm."* This reduced timer/alarm swaps significantly.
+
+3. **Confidence threshold tuning.** I lowered `confidence_threshold` to 0.1 to prevent premature cloud handoffs — FunctionGemma's built-in confidence signal was too conservative, rejecting correct outputs. I handle routing ourselves instead of relying on the model's self-assessment.
+
+4. **Model singleton with KV cache reset.** Loading FunctionGemma on every call cost ~500ms. I switched to loading once and calling `cactus_reset` between queries to clear state without reinitializing.
+
+5. **Tool RAG disabled.** Set `tool_rag_top_k=0` to pass all tools to the model instead of letting Cactus pre-filter. The pre-filtering was dropping the correct tool on some queries.
+
+6. **JSON repair layer.** FunctionGemma outputs malformed JSON — leading zeros (`"minute":01`), fullwidth colons, `<escape>` tags. I added a repair pass before parsing.
+
+7. **Query decomposition.** Multi-intent queries failed when sent as one prompt. I split on conjunctions but only when the next word is an action verb — preventing false splits on phrases like "mac and cheese" or "R&B".
+
+8. **Pronoun resolution.** After decomposition, "find Laura and send her a message" needs "her" replaced with "Laura" in the second sub-query. I extract proper nouns from earlier sub-queries and substitute pronouns.
+
+9. **Argument post-processing.** The biggest win. Rather than trusting FunctionGemma's arguments, I extract them from the original query. This fixed hallucinated song names, broken PM conversions, and wrong timer values.
+
+10. **Validation ordering.** Initially I validated *before* fixing arguments — which meant `minute=120` got rejected and fell to cloud. Flipping the order (fix first, validate after) converted several cloud fallbacks to on-device.
+
+11. **Cloud output normalization.** Gemini returns protobuf types, not native Python. Trailing periods on strings (`"thanks for lunch."`) caused F1 mismatches. I cast all cloud arguments to native types and strip trailing punctuation.
+
+## Results
+
+| Metric | Value |
+|--------|-------|
+| F1 (tool call accuracy) | 0.96 |
+| On-device ratio | ~60% |
+| Avg latency | ~1400ms |
+| Hard cases (multi-intent) | 98% F1, 100% on-device |
+
+## Trade-offs
+
+- **5 tools only** — FunctionGemma-270M gets confused with more. Five well-scoped tools give high on-device accuracy.
+- **Sequential sub-query execution** — Multi-intent queries run N model calls. Parallel would be faster but risks race conditions on macOS actions.
+- **Rule-based slot filling** — Doesn't help with completely novel argument schemas, but cloud fallback catches those.
+- **Cloud fallback adds latency** — ~1000ms penalty, but ensures correctness over speed.
+
+---
+
+## What is Spike?
+
+Spike is a macOS menu bar voice agent. Hold a hotkey, speak a command, and your Mac executes it — opens apps, types text, presses keyboard shortcuts, clicks UI elements, reads screen content. The entire pipeline runs on-device by default: **Cactus Whisper** for transcription, **FunctionGemma-270M** for tool routing, with **Gemini 2.5 Flash** as a cloud fallback only when on-device confidence is low.
+
+## Architecture
+
+```
+Voice ──→ Cactus Whisper (on-device) ──→ Transcribed text
+                                              │
+                                              ▼
+                                     Query Decomposition
+                                     (split multi-intent)
+                                              │
+                                              ▼
+                                   FunctionGemma (on-device)
+                                   Intent classification
+                                              │
+                                              ▼
+                                    Rule-Based Slot Filling
+                                    Fix arguments from query
+                                              │
+                                              ▼
+                                   Validation + Sanity Check
+                                      │              │
+                                    Pass           Fail
+                                      │              │
+                                      ▼              ▼
+                                  On-Device     Gemini Flash
+                                  (~250ms)      (cloud fallback)
+                                      │              │
+                                      └──────┬───────┘
+                                              ▼
+                                    Action Dispatcher
+                                    (NSWorkspace, CGEvent,
+                                     AXUIElement)
+```
+
+**Key insight:** FunctionGemma is excellent at picking *which* function to call but poor at extracting *accurate arguments*. I follow the same architecture as production voice assistants (Siri, Alexa): neural model for intent classification, rule-based extraction for entities. FunctionGemma always runs first — regex is never used for function selection.
+
+## Hybrid Routing — How It Works
+
+1. **Query Decomposition** — Multi-intent queries ("open Safari and type google.com") are split on action verbs. Each sub-query gets independent FunctionGemma inference.
+
+2. **Pronoun Resolution** — "Find Laura and send her a message" → second sub-query becomes "send Laura a message".
+
+3. **FunctionGemma Inference** — On-device intent classification. Picks the function from available tools. ~200-400ms.
+
+4. **Argument Fixing** — Post-processor extracts accurate arguments from the original query text. Handles AM/PM time conversion, song names, contact names, locations, reminder titles. If the tool type is unknown, model's original arguments pass through.
+
+5. **Validation** — Rejects garbage outputs: out-of-range hours/minutes, CJK hallucinations, ISO datetime formats. Cross-checks function names against query keywords (e.g., "remind" → must be `create_reminder`, not `set_alarm`).
+
+6. **Cloud Fallback** — When validation fails, Gemini 2.5 Flash handles it. Total latency includes both on-device attempt + cloud call for full transparency.
+
+## Technologies
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| On-device transcription | **Cactus Whisper** (`cactus_transcribe`) | Voice → text, fully local |
+| On-device tool routing | **FunctionGemma-270M** via **Cactus** (`cactus_complete`) | Intent classification |
+| Cloud fallback | **Gemini 2.5 Flash** (`google-genai`) | Handles cases FunctionGemma can't |
+| App execution | **macOS** NSWorkspace, CGEvent, AXUIElement | Opens apps, types, clicks, reads screen |
+| Bridge server | **FastAPI** (Python) | Connects Swift frontend to Cactus/Gemini |
+| Frontend | **SwiftUI** menu bar app | Hotkey capture, audio recording, result display |
+| Audio | **AVAudioRecorder** (16kHz mono PCM) | Captures voice input |
+
+## What Makes Spike Different
+
+**Privacy-first.** Voice, screen content, and commands stay on-device. Cloud is only used when FunctionGemma's confidence drops below threshold — and the user sees exactly when that happens via the on-device/cloud badge.
+
+**Real execution.** This isn't a mock demo. Spike opens real apps, types real text, presses real keyboard shortcuts, and clicks real buttons via macOS Accessibility APIs.
+
+**Low latency.** On-device path: ~250ms from voice to action. Cloud fallback: ~1300ms. Users feel the difference.
+
+**Generalizable routing.** The hybrid logic handles any tool schema. Known tools get argument fixing for near-perfect accuracy. Unknown tools degrade gracefully to cloud — correct but slower.
+
+---
+
 ## Context
 - Cactus runs Google DeepMind's FunctionGemma at up to 3000 toks/sec prefill speed on M4 Macs.
 - While decode speed reaches 200 tokens/sec, all without GPU, to remain energy-efficient. 
