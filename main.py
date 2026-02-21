@@ -45,6 +45,51 @@ def _fix_arguments(function_calls):
     return function_calls
 
 
+def _validate_call(call):
+    """Reject calls with garbage arguments from FunctionGemma."""
+    args = call.get("arguments", {})
+    for val in args.values():
+        if isinstance(val, str):
+            if re.search(r'[\u4e00-\u9fff]', val):
+                return False
+            if re.match(r'\d{4}-\d{2}-\d{2}T', val):
+                return False
+    name = call.get("name", "")
+    if name == "set_alarm":
+        hour = args.get("hour")
+        minute = args.get("minute")
+        if isinstance(hour, (int, float)) and not (0 <= hour <= 23):
+            return False
+        if isinstance(minute, (int, float)) and not (0 <= minute <= 59):
+            return False
+    if name == "set_timer":
+        minutes = args.get("minutes")
+        if isinstance(minutes, (int, float)) and not (1 <= minutes <= 1440):
+            return False
+    return True
+
+
+def _sanity_check(call, query):
+    """Cross-check function name against keywords in the user query."""
+    q = query.lower()
+    name = call.get("name", "")
+    args = call.get("arguments", {})
+
+    if ("remind" in q or "reminder" in q) and name != "create_reminder":
+        return False
+    if "timer" in q and name == "set_alarm":
+        return False
+    if "alarm" in q and name == "set_timer":
+        return False
+    if name == "set_alarm" and "pm" in q:
+        h = args.get("hour", 0)
+        if isinstance(h, (int, float)) and h < 12:
+            return False
+    if re.search(r'\btext\b', q) and name != "send_message":
+        return False
+    return True
+
+
 def generate_cactus(messages, tools):
     """Run function calling on-device via FunctionGemma + Cactus."""
     model = _get_model()
@@ -195,9 +240,12 @@ def generate_hybrid(messages, tools):
     if len(sub_queries) > 1:
         sub_queries = _resolve_pronouns(sub_queries)
 
+    valid_names = {t["name"] for t in tools}
+
     # Single intent — normal path
     if len(sub_queries) <= 1:
         local = generate_cactus(messages, tools)
+        local["function_calls"] = [c for c in local["function_calls"] if c.get("name") in valid_names and _validate_call(c) and _sanity_check(c, user_msg)]
         if local["function_calls"]:
             local["source"] = "on-device"
             return local
@@ -213,8 +261,9 @@ def generate_hybrid(messages, tools):
         sub_messages = [{"role": "user", "content": sq}]
         local = generate_cactus(sub_messages, tools)
         total_time += local.get("total_time_ms", 0)
-        if local["function_calls"]:
-            all_calls.extend(local["function_calls"])
+        valid_calls = [c for c in local["function_calls"] if c.get("name") in valid_names and _validate_call(c) and _sanity_check(c, sq)]
+        if valid_calls:
+            all_calls.extend(valid_calls)
         else:
             cloud = generate_cloud(sub_messages, tools)
             total_time += cloud.get("total_time_ms", 0)
