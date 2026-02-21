@@ -1,17 +1,14 @@
-//
-//  SpikeApp.swift
-//  Spike
-//
-//  Created by Ruban on 2026-02-21.
-//
-
 import SwiftUI
 
 @main
 struct SpikeApp: App {
+    @State private var appState = AppState()
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra("Spike", systemImage: "waveform.circle.fill") {
+            MenuBarPopover()
+                .environment(appState)
         }
+        .menuBarExtraStyle(.window)
     }
 }
