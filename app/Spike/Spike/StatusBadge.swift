@@ -8,12 +8,19 @@ struct StatusBadge: View {
     }
 
     var body: some View {
-        Text(isOnDevice ? "On-Device" : "Cloud")
-            .font(.caption2.bold())
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(isOnDevice ? Color.green : Color.blue)
-            .foregroundStyle(.white)
-            .clipShape(Capsule())
+        Label(
+            isOnDevice ? "On-Device" : "Cloud",
+            systemImage: isOnDevice ? "cpu" : "cloud"
+        )
+        .font(.caption2)
+        .fontWeight(.medium)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .foregroundStyle(isOnDevice ? Color.green : Color.blue)
+        .background(
+            Capsule()
+                .fill((isOnDevice ? Color.green : Color.blue).opacity(isOnDevice ? 0.15 : 0))
+                .strokeBorder(isOnDevice ? Color.green.opacity(0.4) : Color.blue.opacity(0.4), lineWidth: 1)
+        )
     }
 }

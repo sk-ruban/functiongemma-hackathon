@@ -39,6 +39,12 @@ enum KeyboardSimulator {
 
     static func typeText(_ text: String) {
         for char in text {
+            if char == "\n" || char == "\r" {
+                _ = pressShortcut("Return")
+                Thread.sleep(forTimeInterval: 0.02)
+                continue
+            }
+
             let str = String(char)
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }

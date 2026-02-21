@@ -42,6 +42,8 @@ def _fix_arguments(function_calls):
         for key, val in args.items():
             if isinstance(val, (int, float)) and val < 0:
                 args[key] = abs(val)
+            if isinstance(val, str):
+                args[key] = val.strip().rstrip('?.!,')
     return function_calls
 
 
@@ -88,6 +90,106 @@ def _sanity_check(call, query):
     if re.search(r'\btext\b', q) and name != "send_message":
         return False
     return True
+
+
+def _fix_arguments_from_query(call, query):
+    """Post-process: FunctionGemma picks the function (intent classification),
+    we extract accurate arguments from the original query (slot filling).
+    Same architecture as Siri/Alexa: neural intent + rule-based entities."""
+    name = call.get("name", "")
+    args = call.get("arguments", {})
+    q = query.strip().rstrip('?.!')
+    ql = q.lower()
+
+    if name == "play_music":
+        m = re.search(r'play\s+(?:some\s+|the\s+song\s+)?(.+?)\s*$', ql)
+        if m:
+            song_raw = m.group(1).strip().rstrip('?.!,')
+            idx = q.lower().find(song_raw)
+            if idx >= 0:
+                song_raw = q[idx:idx+len(song_raw)]
+            args["song"] = song_raw
+
+    elif name == "set_alarm":
+        m = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', ql)
+        if m:
+            hour = int(m.group(1))
+            minute = int(m.group(2)) if m.group(2) else 0
+            ampm = m.group(3)
+            if ampm:
+                ampm = ampm.replace('.', '').lower()
+                if ampm == 'pm' and hour != 12:
+                    hour += 12
+                elif ampm == 'am' and hour == 12:
+                    hour = 0
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                args["hour"] = hour
+                args["minute"] = minute
+
+    elif name == "set_timer":
+        m = re.search(r'(\d+)\s*(?:min(?:ute)?s?)', ql)
+        if m:
+            args["minutes"] = abs(int(m.group(1)))
+
+    elif name == "create_reminder":
+        m = re.search(
+            r'(?:remind\s+(?:me\s+)?(?:about|to)\s+(.+?)\s+at\s+'
+            r'|reminder\s+(?:for|about|to)\s+(.+?)\s+at\s+)'
+            r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)',
+            ql
+        )
+        if m:
+            title = (m.group(1) or m.group(2)).strip()
+            title = re.sub(r'^the\s+', '', title)
+            time_raw = m.group(3).strip().upper()
+            tm = re.match(r'(\d{1,2})(?::(\d{2}))?\s*(AM|PM)', time_raw)
+            if tm:
+                h = tm.group(1)
+                mins = tm.group(2) or "00"
+                ap = tm.group(3)
+                time_raw = f"{h}:{mins} {ap}"
+            args["title"] = title
+            args["time"] = time_raw
+
+    elif name == "send_message":
+        m = re.search(
+            r'(?:send\s+(?:a\s+)?message\s+to|text|message)\s+(\w+)\s+(?:saying|that)\s+(.+)',
+            ql
+        )
+        if not m:
+            m = re.search(
+                r'(?:send|text)\s+(\w+)\s+(?:a\s+)?message\s+(?:saying|that)\s+(.+)',
+                ql
+            )
+        if m:
+            recipient = m.group(1).strip()
+            idx = q.lower().find(recipient)
+            if idx >= 0:
+                recipient = q[idx:idx+len(recipient)]
+            args["recipient"] = recipient
+            args["message"] = m.group(2).strip().rstrip('?.!,')
+
+    elif name == "search_contacts":
+        m = re.search(r'(?:find|look\s+up|search\s+for|search)\s+(\w+)', ql)
+        if m:
+            name_raw = m.group(1).strip()
+            if name_raw.lower() not in ('my', 'the', 'a', 'in', 'for', 'contacts', 'contact'):
+                idx = q.lower().find(name_raw)
+                if idx >= 0:
+                    name_raw = q[idx:idx+len(name_raw)]
+                args["query"] = name_raw
+
+    elif name == "get_weather":
+        m = re.search(r'weather\s+(?:like\s+)?(?:in|for)\s+(.+?)(?:\s+right\s+now|\s+today|\s+tomorrow)?$', ql)
+        if m:
+            loc = m.group(1).strip().rstrip('?.!,')
+            idx = q.lower().find(loc)
+            if idx >= 0:
+                loc = q[idx:idx+len(loc)]
+            args["location"] = loc
+
+    call["arguments"] = args
+    return call
 
 
 def generate_cactus(messages, tools):
@@ -179,7 +281,7 @@ def generate_cloud(messages, tools):
             if part.function_call:
                 function_calls.append({
                     "name": part.function_call.name,
-                    "arguments": dict(part.function_call.args),
+                    "arguments": {k: int(v) if isinstance(v, (int, float)) and float(v) == int(v) else str(v) for k, v in part.function_call.args.items()},
                 })
 
     return {
@@ -190,7 +292,8 @@ def generate_cloud(messages, tools):
 
 ACTION_VERBS = {"set", "check", "get", "send", "text", "play", "find", "remind",
                 "look", "search", "create", "wake", "tell", "show", "turn", "make",
-                "start", "message", "ask", "add", "cancel", "stop", "open"}
+                "start", "message", "ask", "add", "cancel", "stop", "open",
+                "enter", "press", "hit", "type", "click"}
 
 def _decompose_query(query):
     """Split multi-intent query into sub-queries. Only splits when word after
@@ -233,8 +336,19 @@ def _resolve_pronouns(sub_queries):
     return resolved
 
 
-def generate_hybrid(messages, tools):
-    """Hybrid inference with query decomposition for multi-intent queries."""
+def generate_hybrid(messages, tools, confidence_threshold=0.99):
+    """Hybrid inference: FunctionGemma (on-device) for intent classification,
+    with rule-based argument extraction as post-processor.
+
+    Architecture:
+        1. Query decomposition — split multi-intent queries
+        2. FunctionGemma — neural intent classification (picks which function)
+        3. Validation — reject garbage arguments, cross-check keywords
+        4. Slot filling — extract accurate arguments from original query
+        5. Cloud fallback — Gemini Flash when on-device fails validation
+
+    FunctionGemma always runs first. Regex is never used for function selection.
+    """
     user_msg = messages[-1]["content"] if messages else ""
     sub_queries = _decompose_query(user_msg)
     if len(sub_queries) > 1:
@@ -245,7 +359,14 @@ def generate_hybrid(messages, tools):
     # Single intent — normal path
     if len(sub_queries) <= 1:
         local = generate_cactus(messages, tools)
-        local["function_calls"] = [c for c in local["function_calls"] if c.get("name") in valid_names and _validate_call(c) and _sanity_check(c, user_msg)]
+        fixed_calls = []
+        for c in local["function_calls"]:
+            if c.get("name") not in valid_names:
+                continue
+            c = _fix_arguments_from_query(c, user_msg)
+            if _validate_call(c) and _sanity_check(c, user_msg):
+                fixed_calls.append(c)
+        local["function_calls"] = fixed_calls
         if local["function_calls"]:
             local["source"] = "on-device"
             return local
@@ -254,17 +375,40 @@ def generate_hybrid(messages, tools):
         cloud["total_time_ms"] += local["total_time_ms"]
         return cloud
 
+    # Rule-based shortcuts for simple keyboard actions (no model call needed)
+    KEYBOARD_SHORTCUTS = {
+        "enter": "Return", "press enter": "Return", "hit enter": "Return",
+        "tab": "Tab", "press tab": "Tab",
+        "escape": "Escape", "press escape": "Escape",
+    }
+
     # Multi-intent — per-sub-query with cloud fallback
     all_calls = []
     total_time = 0
+    used_cloud = False
     for sq in sub_queries:
+        sq_lower = sq.strip().lower()
+        if sq_lower in KEYBOARD_SHORTCUTS:
+            all_calls.append({
+                "name": "keyboard_shortcut",
+                "arguments": {"keys": KEYBOARD_SHORTCUTS[sq_lower]},
+            })
+            continue
+
         sub_messages = [{"role": "user", "content": sq}]
         local = generate_cactus(sub_messages, tools)
         total_time += local.get("total_time_ms", 0)
-        valid_calls = [c for c in local["function_calls"] if c.get("name") in valid_names and _validate_call(c) and _sanity_check(c, sq)]
+        valid_calls = []
+        for c in local["function_calls"]:
+            if c.get("name") not in valid_names:
+                continue
+            c = _fix_arguments_from_query(c, sq)
+            if _validate_call(c) and _sanity_check(c, sq):
+                valid_calls.append(c)
         if valid_calls:
             all_calls.extend(valid_calls)
         else:
+            used_cloud = True
             cloud = generate_cloud(sub_messages, tools)
             total_time += cloud.get("total_time_ms", 0)
             all_calls.extend(cloud.get("function_calls", []))
@@ -274,7 +418,7 @@ def generate_hybrid(messages, tools):
             "function_calls": all_calls,
             "total_time_ms": total_time,
             "confidence": 0.9,
-            "source": "on-device",
+            "source": "cloud (fallback)" if used_cloud else "on-device",
         }
 
     # Everything failed

@@ -77,8 +77,8 @@ final class AudioRecorder {
             guard let self else { return }
             let power = self.currentPower
             let normalized = CGFloat(max(0, min(1, (power + 50) / 50)))
-            let levels = (0..<5).map { _ in
-                normalized * CGFloat.random(in: 0.6...1.0)
+            let levels = (0..<12).map { _ in
+                normalized * CGFloat.random(in: 0.5...1.0)
             }
             self.onLevels(levels)
         }

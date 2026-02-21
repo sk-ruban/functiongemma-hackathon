@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import SwiftUI
 import Observation
@@ -26,7 +27,7 @@ enum Phase: Equatable {
 @Observable
 final class AppState {
     var phase: Phase = .idle
-    var audioLevels: [CGFloat] = Array(repeating: 0, count: 5)
+    var audioLevels: [CGFloat] = Array(repeating: 0, count: 12)
     var actionResults: [ActionResult] = []
 
     private var audioRecorder: AudioRecorder?
@@ -34,6 +35,7 @@ final class AppState {
     private let bridgeClient = BridgeClient()
     private let actionDispatcher = ActionDispatcher()
     private var recordingStartDate: Date?
+    private var previousApp: NSRunningApplication?
 
     func setup() {
         Task.detached {
@@ -65,6 +67,7 @@ final class AppState {
             return
         }
 
+        previousApp = NSWorkspace.shared.frontmostApplication
         phase = .recording
         actionResults = []
         audioRecorder = AudioRecorder { [weak self] levels in
@@ -100,6 +103,11 @@ final class AppState {
                 let response = try await bridgeClient.transcribeAndAct(audioFileURL: url)
                 phase = .result(response)
 
+                if let app = previousApp {
+                    app.activate()
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+
                 let results = await actionDispatcher.dispatch(response.functionCalls)
                 actionResults = results
             } catch {
@@ -113,6 +121,6 @@ final class AppState {
     func reset() {
         phase = .idle
         actionResults = []
-        audioLevels = Array(repeating: 0, count: 5)
+        audioLevels = Array(repeating: 0, count: 12)
     }
 }
