@@ -38,7 +38,7 @@
 - Use `python benchmark.py` to iterate, but your best score is preserved.
 - For transparency, hackers can see live rankings on the [leaderboard](https://cactusevals.ngrok.app).
 - Leaderboard will start accepting submissions once event starts. 
-- The top 10 in each location will make it to judging.
+- The top hackers in each location will make it to judging.
 
 ## Qualitative Judging 
 - **Rubric 1**: The quality of your hybrid routing algorithm, depth and cleverness.
