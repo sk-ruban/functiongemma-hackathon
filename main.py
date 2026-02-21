@@ -3,7 +3,7 @@ import sys
 sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
 
-import json, os, time
+import json, os, time, re
 from cactus import cactus_init, cactus_complete, cactus_destroy, cactus_reset
 from google import genai
 from google.genai import types
@@ -15,6 +15,28 @@ def _get_model():
     if _model is None:
         _model = cactus_init(functiongemma_path)
     return _model
+
+
+def _repair_json(raw_str):
+    """Attempt to fix common FunctionGemma JSON issues."""
+    if not raw_str:
+        return raw_str
+    # Fix leading zeros in numbers (e.g. "minute":01 → "minute":1)
+    raw_str = re.sub(r':\s*0+(\d+)', r':\1', raw_str)
+    # Fix fullwidth colon (：) → normal colon
+    raw_str = raw_str.replace('：', ':')
+    # Remove <escape> tags
+    raw_str = raw_str.replace('<escape>', '')
+    return raw_str
+
+def _fix_arguments(function_calls):
+    """Post-process function call arguments."""
+    for call in function_calls:
+        args = call.get("arguments", {})
+        for key, val in args.items():
+            if isinstance(val, (int, float)) and val < 0:
+                args[key] = abs(val)
+    return function_calls
 
 
 def generate_cactus(messages, tools):
@@ -41,14 +63,19 @@ def generate_cactus(messages, tools):
     try:
         raw = json.loads(raw_str)
     except json.JSONDecodeError:
-        return {
-            "function_calls": [],
-            "total_time_ms": 0,
-            "confidence": 0,
-        }
+        try:
+            raw = json.loads(_repair_json(raw_str))
+        except json.JSONDecodeError:
+            return {
+                "function_calls": [],
+                "total_time_ms": 0,
+                "confidence": 0,
+            }
+
+    calls = _fix_arguments(raw.get("function_calls", []))
 
     return {
-        "function_calls": raw.get("function_calls", []),
+        "function_calls": calls,
         "total_time_ms": raw.get("total_time_ms", 0),
         "confidence": raw.get("confidence", 0),
     }
